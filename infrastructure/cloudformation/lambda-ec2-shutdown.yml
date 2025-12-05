@@ -112,7 +112,6 @@ Resources:
   ShutdownScheduleRule:
     Type: AWS::Events::Rule
     Properties:
-      Name: !Sub "${LambdaFunctionName}-ScheduleRule"
       Description: !Sub "Daily shutdown rule for ${LambdaFunctionName}"
       ScheduleExpression: !Ref ScheduleExpression
       State: ENABLED
