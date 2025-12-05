@@ -1,0 +1,46 @@
+name: EC2 Shutdown Lambda (Main - Prod)
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Zip Lambda code
+        run: zip function.zip lambda_function.py
+
+      - name: Upload to S3 (prod)
+        run: |
+          aws s3 cp function.zip s3://$S3_BUCKET_PROD/$S3_PATH_PROD
+        env:
+          S3_BUCKET_PROD: ${{ secrets.S3_BUCKET_PROD }}
+          S3_PATH_PROD: ${{ secrets.S3_PATH_PROD }}
+
+      - name: Deploy CloudFormation (prod)
+        run: |
+          aws cloudformation deploy \
+            --stack-name $CF_STACK_NAME_PROD \
+            --template-file infrastructure/cloudformation/lambda-ec2-shutdown.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              LambdaFunctionName=$LAMBDA_NAME_PROD \
+              LambdaCodeBucket=$S3_BUCKET_PROD \
+              LambdaCodeKey=$S3_PATH_PROD
+        env:
+          CF_STACK_NAME_PROD: ${{ secrets.CF_STACK_NAME_PROD }}
+          LAMBDA_NAME_PROD: ${{ secrets.LAMBDA_NAME_PROD }}
+          S3_BUCKET_PROD: ${{ secrets.S3_BUCKET_PROD }}
+          S3_PATH_PROD: ${{ secrets.S3_PATH_PROD }}
