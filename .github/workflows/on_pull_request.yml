@@ -1,0 +1,46 @@
+name: EC2 Shutdown Lambda (PR - Beta)
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  deploy-beta:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Zip Lambda code
+        run: zip function.zip lambda_function.py
+
+      - name: Upload to S3 (beta)
+        run: |
+          aws s3 cp function.zip s3://$S3_BUCKET_BETA/$S3_PATH_BETA
+        env:
+          S3_BUCKET_BETA: ${{ secrets.S3_BUCKET_BETA }}
+          S3_PATH_BETA: ${{ secrets.S3_PATH_BETA }}
+
+      - name: Deploy CloudFormation (beta)
+        run: |
+          aws cloudformation deploy \
+            --stack-name $CF_STACK_NAME_BETA \
+            --template-file infrastructure/cloudformation/lambda-ec2-shutdown.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              LambdaFunctionName=$LAMBDA_NAME_BETA \
+              LambdaCodeBucket=$S3_BUCKET_BETA \
+              LambdaCodeKey=$S3_PATH_BETA
+        env:
+          CF_STACK_NAME_BETA: ${{ secrets.CF_STACK_NAME_BETA }}
+          LAMBDA_NAME_BETA: ${{ secrets.LAMBDA_NAME_BETA }}
+          S3_BUCKET_BETA: ${{ secrets.S3_BUCKET_BETA }}
+          S3_PATH_BETA: ${{ secrets.S3_PATH_BETA }}
