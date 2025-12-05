@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Lambda EC2 shutdown with tag filtering + DynamoDB logging"
+Description: "Lambda EC2 shutdown with tag filtering, DynamoDB logging, EventBridge schedule, and HTTP API trigger"
 
 Parameters:
   LambdaFunctionName:
@@ -20,7 +20,7 @@ Parameters:
     AllowedValues:
       - beta
       - prod
-    Description: Deployment environment indicator
+    Description: Deployment environment indicator (used for stage names, tags, etc.)
 
   ScheduleExpression:
     Type: String
@@ -31,7 +31,9 @@ Parameters:
 
 Resources:
 
+  # ----------------------------------------------------------
   # DynamoDB table used to log shutdown events
+  # ----------------------------------------------------------
   ShutdownLogTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -48,7 +50,9 @@ Resources:
         - AttributeName: ShutdownTimeUtc
           KeyType: RANGE
 
+  # ----------------------------------------------------------
   # IAM role assumed by the Lambda function
+  # ----------------------------------------------------------
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -90,7 +94,9 @@ Resources:
                   - dynamodb:DescribeTable
                 Resource: !GetAtt ShutdownLogTable.Arn
 
+  # ----------------------------------------------------------
   # Lambda function that stops tagged EC2 instances and logs to DynamoDB
+  # ----------------------------------------------------------
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -108,10 +114,13 @@ Resources:
           SHUTDOWN_LOG_TABLE: !Ref ShutdownLogTable
           ENVIRONMENT: !Ref Environment
 
+  # ----------------------------------------------------------
   # EventBridge rule to trigger the Lambda on a schedule
+  # ----------------------------------------------------------
   ShutdownScheduleRule:
     Type: AWS::Events::Rule
     Properties:
+      Name: !Sub "${LambdaFunctionName}-ScheduleRule"
       Description: !Sub "Daily shutdown rule for ${LambdaFunctionName}"
       ScheduleExpression: !Ref ScheduleExpression
       State: ENABLED
@@ -128,6 +137,46 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt ShutdownScheduleRule.Arn
 
+  # ----------------------------------------------------------
+  # HTTP API (API Gateway v2) to trigger the Lambda on-demand
+  # ----------------------------------------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${LambdaFunctionName}-HttpApi"
+      ProtocolType: HTTP
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /shutdown"
+      Target: !Sub "integrations/${HttpApiIntegration}"
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: !Ref Environment    # beta or prod
+      AutoDeploy: true
+
+  # Permission for API Gateway to invoke the Lambda
+  PermissionForHttpApiToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/shutdown"
+
 Outputs:
   LambdaFunctionNameOutput:
     Description: Name of the Lambda function
@@ -140,3 +189,7 @@ Outputs:
   ShutdownScheduleRuleNameOutput:
     Description: Name of the EventBridge schedule rule
     Value: !Ref ShutdownScheduleRule
+
+  HttpApiInvokeUrl:
+    Description: Base invoke URL for the HTTP API shutdown endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/shutdown"
