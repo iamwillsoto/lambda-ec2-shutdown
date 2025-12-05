@@ -1,76 +1,143 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Lambda function to stop EC2 instances on a schedule
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Lambda EC2 shutdown with tag filtering + DynamoDB logging"
 
 Parameters:
   LambdaFunctionName:
     Type: String
-    Default: EC2ShutdownLambda
-    Description: Name for the Lambda function
+    Description: Name of the Lambda function to create (e.g., shutdown-lambda-beta)
 
   LambdaCodeBucket:
     Type: String
-    Description: S3 bucket where the Lambda deployment package is stored
+    Description: S3 bucket where the Lambda deployment package (function.zip) is stored
 
   LambdaCodeKey:
     Type: String
-    Description: S3 key for the Lambda deployment package (e.g., path/to/lambda.zip)
+    Description: S3 key (path) to the Lambda deployment package (e.g., lambda-ec2-shutdown/function.zip)
+
+  Environment:
+    Type: String
+    Default: beta
+    AllowedValues:
+      - beta
+      - prod
+    Description: Deployment environment indicator
+
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 23 * * ? *)
+    Description: |
+      EventBridge schedule expression for the shutdown job.
+      Default: daily at 23:00 UTC (adjust as needed).
 
 Resources:
 
+  # DynamoDB table used to log shutdown events
+  ShutdownLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${LambdaFunctionName}-ShutdownLog"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: InstanceId
+          AttributeType: S
+        - AttributeName: ShutdownTimeUtc
+          AttributeType: S
+      KeySchema:
+        - AttributeName: InstanceId
+          KeyType: HASH
+        - AttributeName: ShutdownTimeUtc
+          KeyType: RANGE
+
+  # IAM role assumed by the Lambda function
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${LambdaFunctionName}-Role"
+      RoleName: !Sub "${LambdaFunctionName}-ExecutionRole"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
       Policies:
-        - PolicyName: EC2ShutdownPolicy
+        - PolicyName: !Sub "${LambdaFunctionName}-Policy"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
-                Action:
-                  - ec2:DescribeInstances
-                  - ec2:StopInstances
-                Resource: "*"
+              # Allow Lambda to write logs to CloudWatch Logs
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+              # Allow Lambda to describe and stop EC2 instances
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:StopInstances
                 Resource: "*"
 
+              # Allow Lambda to write to the DynamoDB shutdown log table
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DescribeTable
+                Resource: !GetAtt ShutdownLogTable.Arn
+
+  # Lambda function that stops tagged EC2 instances and logs to DynamoDB
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Ref LambdaFunctionName
-      Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
-      Timeout: 120
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
+      MemorySize: 128
       Code:
         S3Bucket: !Ref LambdaCodeBucket
         S3Key: !Ref LambdaCodeKey
+      Environment:
+        Variables:
+          SHUTDOWN_LOG_TABLE: !Ref ShutdownLogTable
+          ENVIRONMENT: !Ref Environment
 
-  LambdaScheduleRule:
+  # EventBridge rule to trigger the Lambda on a schedule
+  ShutdownScheduleRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "${LambdaFunctionName}-ScheduleRule"
-      ScheduleExpression: "cron(0 23 * * ? *)"  # 7 PM EST / 8 PM EDT = 11 PM UTC
+      Description: !Sub "Daily shutdown rule for ${LambdaFunctionName}"
+      ScheduleExpression: !Ref ScheduleExpression
       State: ENABLED
       Targets:
         - Arn: !GetAtt LambdaFunction.Arn
-          Id: LambdaFunctionTarget
+          Id: LambdaTarget
 
+  # Permission allowing EventBridge to invoke the Lambda function
   PermissionForEventsToInvokeLambda:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref LambdaFunction
+      FunctionName: !Ref LambdaFunctionName
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt LambdaScheduleRule.Arn
+      SourceArn: !GetAtt ShutdownScheduleRule.Arn
+
+Outputs:
+  LambdaFunctionNameOutput:
+    Description: Name of the Lambda function
+    Value: !Ref LambdaFunctionName
+
+  ShutdownLogTableNameOutput:
+    Description: Name of the DynamoDB table used for shutdown logs
+    Value: !Ref ShutdownLogTable
+
+  ShutdownScheduleRuleNameOutput:
+    Description: Name of the EventBridge schedule rule
+    Value: !Ref ShutdownScheduleRule
