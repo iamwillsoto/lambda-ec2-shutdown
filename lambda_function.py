@@ -22,24 +22,29 @@ def lambda_handler(event, context):
           * {key: value} from API call (when provided)
 
     - Supports two trigger types:
-        1) EventBridge scheduled event  -> no query params
-        2) API Gateway HTTP API (GET)   -> ?key=Release&value=2
+        1) EventBridge scheduled event
+        2) API Gateway (REST or HTTP) -> ?key=Release&value=2
 
     - Stops matching running instances
     - Logs each shutdown to DynamoDB
     """
 
-    # Detect if this is an API Gateway HTTP API call
+    # --- DEBUG: see the raw event in CloudWatch ---
+    print("RAW_EVENT:", json.dumps(event))
+
     source = "schedule"
     tag_key = None
     tag_value = None
 
-    # HTTP API v2 payloads include requestContext.http
-    if isinstance(event, dict) and "requestContext" in event and "http" in event["requestContext"]:
-        source = "api"
+    # Look for queryStringParameters in ANY event shape
+    if isinstance(event, dict):
         qs = event.get("queryStringParameters") or {}
         tag_key = qs.get("key")
         tag_value = qs.get("value")
+
+        # If the caller sent ?key=...&value=..., treat this as API mode
+        if tag_key and tag_value:
+            source = "api"
 
     # Base filters always applied
     filters = [
@@ -48,7 +53,7 @@ def lambda_handler(event, context):
     ]
 
     # If API provided ?key=Release&value=2, use that tag
-    if tag_key and tag_value:
+    if source == "api" and tag_key and tag_value:
         filters.append({"Name": f"tag:{tag_key}", "Values": [tag_value]})
         effective_filter = f"{tag_key}={tag_value}"
     else:
@@ -61,6 +66,7 @@ def lambda_handler(event, context):
     print(f"Trigger source: {source}")
     print(f"Using filters: AutoShutdown=True AND {effective_filter}")
 
+    # --- EC2 lookup ---
     response = ec2.describe_instances(Filters=filters)
 
     instances_to_stop = []
@@ -77,16 +83,15 @@ def lambda_handler(event, context):
                 }
             )
 
-    # 2) Stop all matching instances (if any)
+    # Stop all matching instances (if any)
     if instances_to_stop:
-        ec2.stop_instances(
-            InstanceIds=[i["InstanceId"] for i in instances_to_stop]
-        )
-        print(f"Stopping instances: {[i['InstanceId'] for i in instances_to_stop]}")
+        ids = [i["InstanceId"] for i in instances_to_stop]
+        print(f"Stopping instances: {ids}")
+        ec2.stop_instances(InstanceIds=ids)
     else:
         print("No matching instances found to stop.")
 
-    # 3) Log to DynamoDB, one item per stopped instance
+    # --- DynamoDB logging ---
     logged = 0
     if TABLE_NAME and instances_to_stop:
         table = dynamodb.Table(TABLE_NAME)
@@ -122,7 +127,7 @@ def lambda_handler(event, context):
         "table": TABLE_NAME,
     }
 
-    # If called by HTTP API, return proper HTTP response
+    # If called by HTTP/REST API, return proper HTTP response
     if source == "api":
         return {
             "statusCode": 200,
