@@ -137,3 +137,4 @@ def lambda_handler(event, context):
 
     # For EventBridge schedule, plain JSON is fine
     return result
+
